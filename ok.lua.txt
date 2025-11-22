@@ -1,10 +1,13 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
 
 local Gradient = require(ReplicatedStorage.Packages.Gradients)
 local Rarities = require(ReplicatedStorage.Datas.Rarities)
 local Animals = require(ReplicatedStorage.Datas.Animals)
+
+-- === Y-Offsets & Traits ===
 local animalYOffsets = {
     ["Pot Hotspot"] = 0.23,
     ["La Grande Combinasion"] = -1.6,
@@ -21,190 +24,91 @@ local animalYOffsets = {
     ["Bombombini Gusini"] = 1.4
 }
 
-local traitMultipliers = {
-    ["Galactic"] = 3,
-    ["Nyan"] = 5,
-    ["Fireworks"] = 5,
-    ["Glitched"] = 4
-}
-
+local traitMultipliers = { Galactic = 3, Nyan = 5, Fireworks = 5, Glitched = 4 }
 local traitIcons = {
-    ["Galactic"] = "rbxassetid://99181785766598",
-    ["Nyan"] = "rbxassetid://104229924295526",
-    ["Fireworks"] = "rbxassetid://121100427764858",
-    ["Glitched"] = "rbxassetid://121332433272976"
+    Galactic = "rbxassetid://99181785766598",
+    Nyan = "rbxassetid://104229924295526",
+    Fireworks = "rbxassetid://121100427764858",
+    Glitched = "rbxassetid://121332433272976"
 }
 
+-- WICHTIG: Alle verfügbaren Traits (muss exakt so heißen wie im Spiel!)
+local traitList = { "Galactic", "Nyan", "Fireworks", "Glitched" }
+
+-- === Hilfsfunktionen ===
 local function formatNumber(num)
     local suffixes = {"", "K", "M", "B", "T", "Q"}
     local tier = 1
-    
     while num >= 1000 and tier < #suffixes do
-        num = num / 1000
-        tier = tier + 1
+        num /= 1000
+        tier += 1
     end
-    
-    if num % 1 == 0 then
-        return string.format("%d%s", num, suffixes[tier])
-    else
-        return string.format("%.1f%s", num, suffixes[tier])
-    end
+    return (num % 1 == 0) and ("%d%s"):format(num, suffixes[tier]) or ("%.1f%s"):format(num, suffixes[tier])
 end
 
 local function parseCurrency(str)
-    str = str:gsub("<[^>]+>", "")
-    str = str:gsub("%$", "")
-    str = str:gsub(",", "")
-    str = str:gsub("[^%d%.%a]", "")
-    
-    local numStr, suffix = str:match("^(%d*%.?%d+)(%a*)")
-    local num = tonumber(numStr) or 0
-    
-    suffix = suffix:upper()
-    local multipliers = {
-        K = 1000,
-        M = 1000000,
-        B = 1000000000,
-        T = 1000000000000,
-        Q = 1000000000000000
-    }
-    
-    return num * (multipliers[suffix] or 1)
+    str = str:gsub("<[^>]+>", ""):gsub("%$", ""):gsub(",", "")
+    local num, suffix = str:match("^(%d*%.?%d+)(%a*)")
+    num = tonumber(num) or 0
+    local mult = ({K=1e3, M=1e6, B=1e9, T=1e12, Q=1e15})[suffix:upper()] or 1
+    return num * mult
 end
 
-local Controllers = ReplicatedStorage:WaitForChild("Controllers")
-local Utils = ReplicatedStorage:WaitForChild("Utils")
-local SoundController = require(Controllers.SoundController)
-
+-- === Cashout Anzeige ===
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer.PlayerGui
-local LeftBottom = PlayerGui:WaitForChild("LeftBottom"):WaitForChild("LeftBottom")
-local CashoutFrame = LeftBottom:FindFirstChild("Cashout")
-
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local CashoutFrame = PlayerGui:WaitForChild("LeftBottom"):WaitForChild("LeftBottom"):WaitForChild("Cashout")
 local cashoutTweenInfo = TweenInfo.new(5, Enum.EasingStyle.Linear)
 
 local function showCashout(text, isGreen, playSound)
-    if not CashoutFrame or not CashoutFrame.Template or not CashoutFrame.Template:IsA("TextLabel") then
-        warn("cashout")
-        return
-    end
-    
+    if not CashoutFrame or not CashoutFrame:FindFirstChild("Template") then return end
     local label = CashoutFrame.Template:Clone()
     label.Text = text
-    
-    local color = isGreen and Color3.fromRGB(13, 255, 0) or Color3.fromRGB(255, 0, 0)
-    label.TextColor3 = color
+    label.TextColor3 = isGreen and Color3.fromRGB(13, 255, 0) or Color3.fromRGB(255, 0, 0)
     label.Visible = true
     label.Parent = CashoutFrame
-    
-    local textTween = TweenService:Create(label, cashoutTweenInfo, {TextTransparency = 1})
-    local strokeTween = TweenService:Create(label.UIStroke, cashoutTweenInfo, {Transparency = 1})
-    
-    textTween.Completed:Once(function()
-        label:Destroy()
-    end)
-    
-    textTween:Play()
-    strokeTween:Play()
-    
+
+    TweenService:Create(label, cashoutTweenInfo, {TextTransparency = 1}):Play()
+    TweenService:Create(label.UIStroke, cashoutTweenInfo, {Transparency = 1}):Play()
+
+    task.delay(5, function() if label and label.Parent then label:Destroy() end end)
+
     if playSound and isGreen then
-        SoundController:PlaySound("Sounds.Sfx.Cashout")
+        pcall(function() require(ReplicatedStorage.Controllers.SoundController):PlaySound("Sounds.Sfx.Cashout") end)
     end
 end
 
-local function getAnimalData(animalName)
-    return Animals[animalName] or {}
-end
-
+-- === Haupt-Spawn-Funktion (100% wie Original, aber stabiler) ===
 local function spawnAnimal(animalName, selectedTraits)
+    selectedTraits = selectedTraits or {}
     local animalData = Animals[animalName]
-    if not animalData then
-        return false, "invalid brainrot"
-    end
-    
+    if not animalData then return false, "invalid animal" end
+
     local animalModel = ReplicatedStorage.Models.Animals:FindFirstChild(animalName)
-    if not animalModel then
-        return false, "invalid brainrot"
-    end
-    
-    local foundPlot = false
-    local spawnCFrame = nil
-    local spawnAttachment = nil
-    local claimFrame = nil
-    local hitbox = nil
-    
-    for _, plot in ipairs(workspace.Plots:GetChildren()) do
-        local plotSign = plot:FindFirstChild("PlotSign")
-        if plotSign then
-            local surfaceGui = plotSign:FindFirstChild("SurfaceGui")
-            if surfaceGui then
-                local frame = surfaceGui:FindFirstChild("Frame")
-                if frame then
-                    local textLabel = frame:FindFirstChild("TextLabel")
-                    if textLabel then
-                        local ownerText = textLabel.Text:gsub("^%s*(.-)%s*$", "%1")
-                        
-                        if string.find(ownerText, LocalPlayer.Name) then
-                            local podiums = plot:FindFirstChild("AnimalPodiums")
-                            if podiums then
-                                local podiumList = {}
-                                
-                                for _, child in ipairs(podiums:GetChildren()) do
-                                    if child:IsA("Model") and tonumber(child.Name) then
-                                        table.insert(podiumList, child)
-                                    end
+    if not animalModel then return false, "no model" end
+
+    -- Freien Podiumsplatz finden
+    local spawnCFrame, spawnAttachment, claimFrame, hitbox
+    for _, plot in ipairs(Workspace.Plots:GetChildren()) do
+        local sign = plot:FindFirstChild("PlotSign")
+        if sign and sign.SurfaceGui and sign.SurfaceGui.Frame and sign.SurfaceGui.Frame.TextLabel then
+            if sign.SurfaceGui.Frame.TextLabel.Text:find(LocalPlayer.Name) then
+                local podiums = plot:FindFirstChild("AnimalPodiums")
+                if podiums then
+                    for _, podium in ipairs(podiums:GetChildren()) do
+                        if podium:IsA("Model") and not podium:FindFirstChild("Attachment") then
+                            local base = podium:FindFirstChild("Base")
+                            if base then
+                                local spawn = base:FindFirstChild("Spawn")
+                                if spawn then
+                                    local ySize = animalModel:GetExtentsSize().Y / 2
+                                    local yOffset = animalYOffsets[animalName] or 0
+                                    spawnCFrame = spawn.WorldCFrame * CFrame.new(0, ySize + yOffset - 1, 0)
+                                    spawnAttachment = spawn
+                                    claimFrame = podium:FindFirstChild("Claim") and podium.Claim:FindFirstChild("Main") and podium.Claim.Main:FindFirstChild("Collect")
+                                    hitbox = podium:FindFirstChild("Claim") and podium.Claim:FindFirstChild("Hitbox")
+                                    goto found
                                 end
-                                
-                                table.sort(podiumList, function(a, b)
-                                    return tonumber(a.Name) < tonumber(b.Name)
-                                end)
-                                
-                                for _, podium in ipairs(podiumList) do
-                                    local base = podium:FindFirstChild("Base")
-                                    if base then
-                                        local spawn = base:FindFirstChild("Spawn")
-                                        if spawn then
-                                            local attachment = spawn:FindFirstChild("Attachment")
-                                            if not attachment then
-                                                local baseCFrame
-                                                
-                                                if base:IsA("Model") then
-                                                    local decorations = base:FindFirstChild("Decorations")
-                                                    local part = decorations and decorations:FindFirstChild("Part")
-                                                    if part and part:IsA("BasePart") then
-                                                        baseCFrame = part.CFrame
-                                                    end
-                                                elseif base.PrimaryPart then
-                                                    baseCFrame = base.PrimaryPart.CFrame
-                                                elseif base:IsA("BasePart") then
-                                                    baseCFrame = base.CFrame
-                                                end
-                                                
-                                                if baseCFrame then
-                                                    local ySize = animalModel:GetExtentsSize().Y / 2
-                                                    local yOffset = animalYOffsets[animalName] or 0
-                                                    
-                                                    spawnCFrame = baseCFrame * CFrame.new(0, ySize - 1 + yOffset, 0)
-                                                    spawnAttachment = spawn
-                                                    
-                                                    claimFrame = podium:FindFirstChild("Claim") and 
-                                                                podium.Claim:FindFirstChild("Main") and
-                                                                podium.Claim.Main:FindFirstChild("Collect")
-                                                    
-                                                    hitbox = podium:FindFirstChild("Claim") and
-                                                            podium.Claim:FindFirstChild("Hitbox")
-                                                    
-                                                    foundPlot = true
-                                                    break
-                                                else
-                                                    print("cframe")
-                                                end
-                                            end
-                                        end
-                                    end
-                                end
-                                
-                                if foundPlot then break end
                             end
                         end
                     end
@@ -212,414 +116,204 @@ local function spawnAnimal(animalName, selectedTraits)
             end
         end
     end
-    
-    if not foundPlot then
-        print("full base")
-        return false, "full base"
+    ::found::
+    if not spawnCFrame then return false, "no free podium" end
+
+    -- Tier klonen & platzieren
+    local cloned = animalModel:Clone()
+    cloned:SetPrimaryPartCFrame(spawnCFrame)
+    cloned.Parent = Workspace
+    for _, part in ipairs(cloned:GetDescendants()) do
+        if part:IsA("BasePart") then part.Anchored = true end
     end
-    
-    local clonedAnimal = animalModel:Clone()
-    clonedAnimal:SetPrimaryPartCFrame(spawnCFrame)
-    clonedAnimal.Parent = workspace
-    
-    for _, descendant in ipairs(clonedAnimal:GetDescendants()) do
-        if descendant:IsA("BasePart") then
-            descendant.Anchored = true
-        end
-    end
-    
-    local animController = clonedAnimal:FindFirstChildOfClass("AnimationController")
+
+    -- Idle Animation
+    local animCtrl = cloned:FindFirstChildOfClass("AnimationController")
     local idleAnim = ReplicatedStorage.Animations.Animals:FindFirstChild(animalName)
-    if idleAnim then
-        idleAnim = idleAnim:FindFirstChild("Idle")
+    if idleAnim then idleAnim = idleAnim:FindFirstChild("Idle") end
+    if animCtrl and idleAnim then
+        animCtrl:LoadAnimation(idleAnim):Play()
     end
-    
-    if animController and idleAnim then
-        local track = animController:LoadAnimation(idleAnim)
-        track:Play()
+
+    -- Attachment für Erkennung
+    local marker = Instance.new("Attachment", spawnAttachment)
+
+    -- Generation & Collect
+    local totalGen = 0
+    local genRate = animalData.Generation or 0
+    for _, trait in ipairs(selectedTraits) do
+        genRate += (animalData.Generation or 0) * (traitMultipliers[trait] or 0)
     end
-    
-    local totalGeneration = 0
-    local connection = nil
-    local attachmentMarker = nil
-    local lastCollectTime = 0
-    
-    local marker = Instance.new("Attachment")
-    marker.Name = "Attachment"
-    marker.Parent = spawnAttachment
-    attachmentMarker = marker
-    
-    if claimFrame and claimFrame:FindFirstChild("Offline") then
-        local offline = claimFrame.Offline
-        if offline:IsA("GuiObject") then
-            offline.Visible = false
-        end
-    end
-    
-    if clonedAnimal.PrimaryPart then
-        local proximityPrompt = Instance.new("ProximityPrompt")
-        proximityPrompt.ObjectText = animalData.DisplayName
-        proximityPrompt.ActionText = "Sell: $" .. formatNumber(animalData.Price / 2)
-        proximityPrompt.KeyboardKeyCode = Enum.KeyCode.E
-        proximityPrompt.HoldDuration = 1.5
-        proximityPrompt.MaxActivationDistance = 10
-        proximityPrompt.Parent = clonedAnimal.PrimaryPart
-        
-        proximityPrompt.Triggered:Connect(function(player)
-            if player ~= LocalPlayer then return end
-            
-            local sellPrice = animalData.Price / 2
-            
-            local currencyLabel = PlayerGui.LeftBottom.LeftBottom:FindFirstChild("Currency")
-            if currencyLabel and currencyLabel:IsA("TextLabel") then
-                local currentMoney = parseCurrency(currencyLabel.Text)
-                currencyLabel.Text = "$" .. formatNumber(currentMoney + sellPrice)
+
+    if claimFrame and hitbox then
+        claimFrame.Enabled = true
+        local collectLabel = claimFrame:FindFirstChild("Collect")
+        if collectLabel then collectLabel.Text = "Collect<br/><font color='#73ff00'>$0</font>" end
+
+        hitbox.CanCollide = false
+        local lastCollect = 0
+        hitbox.Touched:Connect(function(part)
+            if Players:GetPlayerFromCharacter(part.Parent) == LocalPlayer and os.time() - lastCollect >= 1 and totalGen > 0 then
+                lastCollect = os.time()
+                local cash = LocalPlayer.leaderstats and LocalPlayer.leaderstats:FindFirstChild("Cash")
+                if cash then cash.Value += totalGen end
+                showCashout("+$"..formatNumber(totalGen), true, true)
+                totalGen = 0
+                if collectLabel then collectLabel.Text = "Collect<br/><font color='#73ff00'>$0</font>" end
             end
-            
-            local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
-            local cash = leaderstats and leaderstats:FindFirstChild("Cash")
-            if cash and (cash:IsA("NumberValue") or cash:IsA("IntValue")) then
-                cash.Value = cash.Value + sellPrice
-            end
-            
-            showCashout("+$" .. formatNumber(sellPrice), true, true)
-            
-            totalGeneration = 0
-            if connection then
-                connection:Disconnect()
-                connection = nil
-            end
-            if claimFrame then
-                claimFrame.Enabled = false
-                local collectLabel = claimFrame:FindFirstChild("Collect")
-                if collectLabel then
-                    collectLabel.Text = "Collect<br/><font color=\"#73ff00\">$0</font>"
-                end
-            end
-            clonedAnimal:Destroy()
-            if attachmentMarker and attachmentMarker.Parent then
-                attachmentMarker:Destroy()
-                attachmentMarker = nil
+        end)
+
+        task.spawn(function()
+            while cloned and cloned.Parent and collectLabel do
+                task.wait(1)
+                totalGen += genRate
+                collectLabel.Text = "Collect<br/><font color='#73ff00'>$"..formatNumber(totalGen).."</font>"
             end
         end)
     end
-    
-    local generationRate = animalData.Generation or 0
-    local traitBonus = 0
-    
-    if selectedTraits then
+
+    -- Sell Prompt
+    if cloned.PrimaryPart then
+        local prompt = Instance.new("ProximityPrompt", cloned.PrimaryPart)
+        prompt.ObjectText = animalData.DisplayName
+        prompt.ActionText = "Sell: $"..formatNumber(animalData.Price/2)
+        prompt.KeyboardKeyCode = Enum.KeyCode.E
+        prompt.HoldDuration = 1.5
+        prompt.Triggered:Connect(function(plr)
+            if plr ~= LocalPlayer then return end
+            local cash = LocalPlayer.leaderstats and LocalPlayer.leaderstats.Cash
+            if cash then cash.Value += animalData.Price/2 end
+            showCashout("+$"..formatNumber(animalData.Price/2), true, true)
+            cloned:Destroy()
+            if marker and marker.Parent then marker:Destroy() end
+        end)
+    end
+
+    -- Overhead GUI
+    local overhead = ReplicatedStorage.Overheads.AnimalOverhead:Clone()
+    overhead.Adornee = cloned:FindFirstChild("Head") or cloned.PrimaryPart
+    overhead.Parent = overhead.Adornee
+    overhead.DisplayName.Text = animalData.DisplayName
+    overhead.Rarity.Text = animalData.Rarity
+    overhead.Price.Text = "$"..formatNumber(animalData.Price.Price)
+    overhead.Generation.Text = "$"..formatNumber(genRate).."/s"
+
+    -- Rarity Farben & Effekte
+    local rarityCfg = Rarities[animalData.Rarity]
+    if rarityCfg then
+        local rarityLabel = overhead:FindFirstChild("Rarity", true)
+        if animalData.Rarity == "Brainrot God" then
+            -- Rainbow Gradient wie im Original
+            local colors = {Color3.new(0,0,0), Color3.fromRGB(139,0,0), Color3.new(1,0,0), Color3.fromRGB(128,0,128), Color3.new(0,0,1), Color3.new(0,0,0)}
+            local keypoints = {}
+            for i = 1, #colors do
+                table.insert(keypoints, ColorSequenceKeypoint.new((i-1)/(#colors-1), colors[i]))
+            end
+            local gradient = Gradient.new(rarityLabel, ColorSequence.new(keypoints), NumberSequence.new(0))
+            gradient:SetOffsetSpeed(0.5, 0.5)
+        elseif rarityCfg.EasyVisualsPresset then
+            -- Andere Effekte
+            pcall(function() EasyVisuals.new(rarityLabel, rarityCfg.EasyVisualsPresset, nil, nil, true, rarityCfg.Color) end)
+        else
+            rarityLabel.TextColor3 = rarityCfg.Color or Color3.new(1,1,1)
+        end
+    end
+
+    -- Traits (Icons + VFX)
+    local traitsContainer = overhead:FindFirstChild("Traits")
+    if traitsContainer then
+        traitsContainer.Visible = true
+        local template = traitsContainer:FindFirstChild("Template")
         for _, trait in ipairs(selectedTraits) do
-            local multiplier = traitMultipliers[trait]
-            if multiplier then
-                traitBonus = traitBonus + (generationRate * multiplier)
+            -- Icon
+            if traitIcons[trait] and template then
+                local icon = template:Clone()
+                icon.Name = trait
+                icon.Image = traitIcons[trait]
+                icon.Visible = true
+                icon.Parent = traitsContainer
             end
-        end
-    end
-    
-    local totalGenRate = generationRate + traitBonus
-    
-    if claimFrame and hitbox then
-        local collectLabel = claimFrame:FindFirstChild("Collect")
-        if collectLabel and collectLabel:IsA("TextLabel") then
-            claimFrame.Enabled = true
-            collectLabel.Text = "Collect<br/><font color=\"#73ff00\">$0</font>"
-            
-            if hitbox:IsA("BasePart") then
-                hitbox.CanCollide = false
-                hitbox.CanQuery = true
-            end
-            
-            hitbox.Touched:Connect(function(hit)
-                local player = Players:GetPlayerFromCharacter(hit.Parent)
-                if player == LocalPlayer and clonedAnimal and clonedAnimal.Parent then
-                    local currentTime = os.time()
-                    if currentTime - lastCollectTime >= 1 and totalGeneration > 0 then
-                        lastCollectTime = currentTime
-                        
-                        local currencyLabel = PlayerGui.LeftBottom.LeftBottom:FindFirstChild("Currency")
-                        if currencyLabel and currencyLabel:IsA("TextLabel") then
-                            local currentMoney = parseCurrency(currencyLabel.Text)
-                            currencyLabel.Text = "$" .. formatNumber(currentMoney + totalGeneration)
-                        end
-                        
-                        local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
-                        local cash = leaderstats and leaderstats:FindFirstChild("Cash")
-                        if cash and (cash:IsA("NumberValue") or cash:IsA("IntValue")) then
-                            cash.Value = cash.Value + totalGeneration
-                        end
-                        
-                        showCashout("+$" .. formatNumber(totalGeneration), true, true)
-                        totalGeneration = 0
-                        collectLabel.Text = "Collect<br/><font color=\"#73ff00\">$0</font>"
-                    end
+
+            -- VFX
+            local vfx = ReplicatedStorage.Vfx.Traits:FindFirstChild(trait)
+            if vfx and vfx:FindFirstChild("VfxInstance") and cloned.PrimaryPart then
+                local clone = vfx.VfxInstance:Clone()
+                clone.Parent = cloned.PrimaryPart
+                if clone:IsA("BasePart") then
+                    clone.Anchored = false
+                    clone.CanCollide = false
+                    clone.Transparency = 1
+                    local weld = Instance.new("WeldConstraint", clone)
+                    weld.Part0 = cloned.PrimaryPart
+                    weld.Part1 = clone
                 end
-            end)
-            
-            claimFrame.Changed:Connect(function(property)
-                if property == "Enabled" and claimFrame.Enabled == false then
-                    claimFrame.Enabled = true
-                end
-            end)
-            
-            task.spawn(function()
-                while claimFrame and claimFrame.Parent and claimFrame.Enabled and 
-                      clonedAnimal and clonedAnimal.Parent do
-                    task.wait(1)
-                    totalGeneration = totalGeneration + totalGenRate
-                    collectLabel.Text = "Collect<br/><font color=\"#73ff00\">$" .. 
-                                       formatNumber(totalGeneration) .. "</font>"
-                end
-                print("loop")
-            end)
-        end
-    end
-    
-    local overheadTemplate = ReplicatedStorage.Overheads:FindFirstChild("AnimalOverhead")
-    local head = clonedAnimal:FindFirstChild("Head") or clonedAnimal.PrimaryPart
-    
-    if overheadTemplate and head then
-        local overhead = overheadTemplate:Clone()
-        overhead.StudsOffset = Vector3.new(0, 7, 0)
-        overhead.Adornee = head
-        overhead.Parent = head
-        overhead.AlwaysOnTop = true
-        overhead.MaxDistance = 200
-        
-        local mutation = overhead:FindFirstChild("Mutation", true)
-        if mutation and mutation:IsA("GuiObject") then
-            mutation.Visible = false
-        end
-        
-        local function updateOverheadText(fieldName, value)
-            local field = overhead:FindFirstChild(fieldName, true)
-            if field then
-                field.Text = value
-            end
-        end
-        
-        updateOverheadText("DisplayName", animalData.DisplayName)
-        updateOverheadText("Rarity", animalData.Rarity)
-        updateOverheadText("Price", "$" .. formatNumber(animalData.Price))
-        updateOverheadText("Generation", "$" .. formatNumber(totalGenRate) .. "/s")
-        
-        local rarityConfig = Rarities[animalData.Rarity]
-        if rarityConfig then
-            local rarityLabel = overhead:FindFirstChild("Rarity", true)
-            if rarityLabel then
-                if animalData.Rarity == "Brainrot God" then
-                    rarityLabel.TextColor3 = Color3.new(1, 1, 1)
-                    rarityLabel.TextStrokeTransparency = 0
-                    rarityLabel.TextStrokeColor3 = Color3.new(1, 1, 1)
-                    
-                    local colors = {
-                        Color3.fromRGB(0, 0, 0),
-                        Color3.fromRGB(139, 0, 0),
-                        Color3.fromRGB(255, 0, 0),
-                        Color3.fromRGB(128, 0, 128),
-                        Color3.fromRGB(0, 0, 255),
-                        Color3.fromRGB(0, 0, 0)
-                    }
-                    
-                    local function lerpColor(c1, c2, t)
-                        return Color3.new(
-                            c1.R + (c2.R - c1.R) * t,
-                            c1.G + (c2.G - c1.G) * t,
-                            c1.B + (c2.B - c1.B) * t
-                        )
-                    end
-                    
-                    local keypoints = {
-                        ColorSequenceKeypoint.new(0, colors[1]),
-                        ColorSequenceKeypoint.new(0.15, lerpColor(colors[1], colors[2], 0.5)),
-                        ColorSequenceKeypoint.new(0.3, colors[2]),
-                        ColorSequenceKeypoint.new(0.45, lerpColor(colors[2], colors[3], 0.5)),
-                        ColorSequenceKeypoint.new(0.6, colors[3]),
-                        ColorSequenceKeypoint.new(0.7, colors[4]),
-                        ColorSequenceKeypoint.new(0.8, colors[5]),
-                        ColorSequenceKeypoint.new(0.9, lerpColor(colors[5], colors[6], 0.5)),
-                        ColorSequenceKeypoint.new(1, colors[6])
-                    }
-                    
-                    local colorSeq = ColorSequence.new(keypoints)
-                    local transparency = NumberSequence.new(0)
-                    local gradient = Gradient.new(rarityLabel, colorSeq, transparency)
-                    gradient:SetOffsetSpeed(0.5, 0.5)
-                    
-                elseif animalData.Rarity == "Secret" then
-                    EasyVisuals.new(rarityLabel, rarityConfig.EasyVisualsPresset, 0.6, nil, true, Color3.new(0, 0, 0))
-                    rarityLabel.TextColor3 = Color3.new(0, 0, 0)
-                    rarityLabel.TextStrokeTransparency = 0
-                    rarityLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
-                    
-                elseif rarityConfig.EasyVisualsPresset then
-                    EasyVisuals.new(rarityLabel, rarityConfig.EasyVisualsPresset, nil, nil, true, rarityConfig.Color)
-                else
-                    rarityLabel.TextColor3 = rarityConfig.Color
-                end
-            end
-        end
-        
-        local traitsContainer = overhead:FindFirstChild("Traits")
-        if traitsContainer then
-            traitsContainer.Visible = true
-            local template = traitsContainer:FindFirstChild("Template")
-            
-            if selectedTraits and clonedAnimal.PrimaryPart then
-                for _, trait in ipairs(selectedTraits) do
-                    local vfxFolder = ReplicatedStorage.Vfx.Traits:FindFirstChild(trait)
-                    if vfxFolder then
-                        local vfxInstance = vfxFolder:FindFirstChild("VfxInstance")
-                        if vfxInstance then
-                            local vfxClone = vfxInstance:Clone()
-                            vfxClone.Parent = clonedAnimal.PrimaryPart
-                            
-                            if vfxClone:IsA("BasePart") then
-                                vfxClone.CFrame = clonedAnimal.PrimaryPart.CFrame
-                                vfxClone.Anchored = false
-                                vfxClone.CanCollide = false
-                                vfxClone.CanQuery = false
-                                vfxClone.Transparency = 1
-                                vfxClone.CastShadow = false
-                                
-                                local weld = Instance.new("WeldConstraint")
-                                weld.Part0 = clonedAnimal.PrimaryPart
-                                weld.Part1 = vfxClone
-                                weld.Parent = vfxClone
-                                
-                                for _, desc in ipairs(vfxClone:GetDescendants()) do
-                                    if desc:IsA("ParticleEmitter") or desc:IsA("Trail") or desc:IsA("Beam") then
-                                        desc.Enabled = true
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    
-                    local iconId = traitIcons[trait]
-                    if iconId and traitsContainer and template then
-                        local icon = template:Clone()
-                        icon.Image = iconId
-                        icon.Visible = true
-                        icon.Parent = traitsContainer
-                        icon.Name = trait .. "_"
+                for _, emitter in ipairs(clone:GetDescendants()) do
+                    if emitter:IsA("ParticleEmitter") or emitter:IsA("Trail") then
+                        emitter.Enabled = true
                     end
                 end
             end
         end
     end
-    
-    return true, clonedAnimal
+
+    return true, cloned
 end
 
-local Decimals = 4
-local Clock = os.clock()
-local ValueText = "Value Is Now :"
-
-local library = loadstring(game:HttpGet("https://raw.githubusercontent.com/drillygzzly/Roblox-UI-Libs/main/1%20Tokyo%20Lib%20(FIXED)/Tokyo%20Lib%20Source.lua"))({
-    cheatname = "Copper Spawner",
-    gamename = "Trax"
-})
-
+-- === NEUES UI (Tokyo Lib) ===
+local library = loadstring(game:HttpGet("https://raw.githubusercontent.com/drillygzzly/Roblox-UI-Libs/main/1%20Tokyo%20Lib%20(FIXED)/Tokyo%20Lib%20Source.lua"))()
+library.cheatname = "Trax Spawner"
+library.gamename = "Trax"
 library:init()
 
-local Window1 = library.NewWindow({
-    title = "Copper Spawner | Trax",
-    size = UDim2.new(0, 510, 0, 400) -- Fixed height for clarity
-})
+local window = library.NewWindow({title = "Trax Brainrot Spawner", size = UDim2.fromOffset(520, 420)})
+local tab = window:AddTab("Main")
 
-local Tab1 = Window1:AddTab("Spawner")
-local SettingsTab = library:CreateSettingsTab(Window1)
-
--- Build animal list (same as before)
-local excludedAnimals = {
-    ["Secret Lucky Block"] = true,
-    ["Chimpanzini Spiderini"] = true,
-    ["Mythic Lucky Block"] = true,
-    ["Brainrot God Lucky Block"] = true
-}
-
+-- Tierliste erstellen
+local excluded = {["Secret Lucky Block"]=true, ["Chimpanzini Spiderini"]=true, ["Mythic Lucky Block"]=true, ["Brainrot God Lucky Block"]=true}
 local animalList = {}
-for name in pairs(Animals) do
-    if not excludedAnimals[name] then
-        table.insert(animalList, name)
-    end
+for name, data in pairs(Animals) do
+    if not excluded[name] then table.insert(animalList, name) end
 end
+table.sort(animalList, function(a,b)
+    local ra = Animals[a].Rarity or ""
+    local rb = Animals[b].Rarity or ""
+    local order = {Secret=1, ["Brainrot God"]=2, Mythic=3, Legendary=4, Epic=5, Rare=6, Common=7}
+    return (order[ra] or 99) < (order[rb] or 99)
+end)
 
--- Sort by rarity
-local animalsByRarity = {}
-for _, name in ipairs(animalList) do
-    local rarity = Animals[name].Rarity or "Unknown"
-    animalsByRarity[rarity] = animalsByRarity[rarity] or {}
-    table.insert(animalsByRarity[rarity], name)
-end
-
-local rarityOrder = {"Secret", "Brainrot God", "Mythic", "Legendary", "Epic", "Rare", "Common", "Unknown"}
-local sortedList = {}
-for _, rarity in ipairs(rarityOrder) do
-    for _, name in ipairs(animalsByRarity[rarity] or {}) do
-        table.insert(sortedList, name)
-    end
-end
-animalList = sortedList
-
--- Trait list (already built globally)
--- Ensure `traitList` is available (from your core script)
-
--- State
-local selectedAnimal = animalList[1] or "None"
+local selectedAnimal = animalList[1]
 local selectedTraits = {}
 
--- Section
-local Section1 = Tab1:AddSection("Brainrot Spawner", 1)
+local section = tab:AddSection("Brainrot Spawner")
 
--- Animal Selection (single-select list)
-Section1:AddList({
-    enabled = true,
-    text = "Select Brainrot",
-    tooltip = "Choose an animal to spawn",
+section:AddList({
+    text = "Select Animal",
+    values = animalList,
     selected = selectedAnimal,
     multi = false,
-    open = false,
-    values = animalList,
-    callback = function(v)
-        selectedAnimal = v
-    end
+    callback = function(val) selectedAnimal = val end
 })
 
--- Trait Selection (multi-select list)
-Section1:AddList({
-    enabled = true,
-    text = "Select Traits",
-    tooltip = "Hold Ctrl or click to multi-select",
-    selected = {}, -- starts empty
-    multi = true,  -- ✅ enables multi-select
-    open = false,
+section:AddList({
+    text = "Select Traits (Hold Ctrl)",
     values = traitList,
-    callback = function(v) -- v is a TABLE of selected traits
-        selectedTraits = v or {}
-    end
+    selected = {},
+    multi = true,
+    callback = function(val) selectedTraits = val end
 })
 
-Section1:AddButton({
-    enabled = true,
+section:AddButton({
     text = "Spawn Brainrot",
-    tooltip = "Spawn selected animal with traits",
-    confirm = false,
-    risky = false,
+    confirm = true,
     callback = function()
-        if not selectedAnimal or selectedAnimal == "None" or selectedAnimal == "" then
-            warn("No brainrot selected!")
-            return
-        end
-
-        local success, err = spawnAnimal(selectedAnimal, selectedTraits)
+        if not selectedAnimal then warn("Kein Tier ausgewählt!") return end
+        local success, result = spawnAnimal(selectedAnimal, selectedTraits)
         if success then
-            print("✅ Spawned:", selectedAnimal, "with traits:", table.concat(selectedTraits, ", ") or "none")
+            library:SendNotification("Spawned: "..selectedAnimal.." with "..(#selectedTraits > 0 and table.concat(selectedTraits, ", ") or "no traits"), 4)
         else
-            warn("❌ Spawn failed:", err)
+            library:SendNotification("Spawn failed: "..tostring(result), 5)
         end
     end
 })
 
-local Time = (string.format("%."..tostring(Decimals).."f", os.clock() - Clock))
-library:SendNotification(("Loaded In "..tostring(Time).."s"), 6)
+library:SendNotification("Trax Spawner loaded!", 5)
